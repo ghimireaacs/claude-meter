@@ -1,0 +1,16 @@
+# Noctalia plugin catalog for this source. One [[plugin]] row per subdirectory;
+# each plugin's own plugin.toml stays authoritative and is re-read on enable.
+
+[[plugin]]
+id = "ghimireaacs/claude-meter"
+name = "Claude Meter"
+version = "1.0.0"
+updated_at = 1788525000
+added_at = 1788525000
+author = "ghimireaacs"
+license = "MIT"
+icon = "brain"
+description = "Claude Code session and weekly plan usage in the bar."
+deprecated = false
+plugin_api = 3
+tags = ["bar", "ai", "indicator", "utility"]

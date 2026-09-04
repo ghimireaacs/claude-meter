@@ -1,0 +1,75 @@
+# claude-meter — Claude Code plan usage in the Noctalia bar.
+#
+# The widget owns no credentials and speaks to no endpoint: it runs
+# `claude-meter --report` and draws the JSON that comes back. Caching, token
+# refresh and rate-limit handling all live in the CLI.
+
+id = "ghimireaacs/claude-meter"
+name = "Claude Meter"
+version = "1.0.0"
+# Oldest plugin API level Noctalia 5 supports, and enough for [[widget]] with
+# per-instance settings, ui nodes, barWidget and runAsync.
+plugin_api = 3
+author = "ghimireaacs"
+license = "MIT"
+icon = "brain"
+description = "Claude Code session and weekly plan usage in the bar."
+tags = ["bar", "ai", "indicator", "utility"]
+dependencies = ["claude-meter"]
+
+[[setting]]
+key = "refresh_minutes"
+type = "int"
+label_key = "settings.refresh_minutes.label"
+description_key = "settings.refresh_minutes.description"
+default = 5
+min = 5
+max = 120
+
+[[widget]]
+id = "bar"
+entry = "bar.luau"
+
+# Per-instance, so a second capsule can watch the weekly window while the first
+# watches the session.
+[[widget.setting]]
+key = "metric"
+type = "select"
+label_key = "settings.metric.label"
+description_key = "settings.metric.description"
+default = "auto"
+options = [
+  { value = "auto", label_key = "settings.metric.option.auto" },
+  { value = "five_hour", label_key = "settings.metric.option.five_hour" },
+  { value = "seven_day", label_key = "settings.metric.option.seven_day" },
+  { value = "seven_day_opus", label_key = "settings.metric.option.seven_day_opus" },
+  { value = "seven_day_sonnet", label_key = "settings.metric.option.seven_day_sonnet" },
+]
+
+[[widget.setting]]
+key = "show_glyph"
+type = "bool"
+label_key = "settings.show_glyph.label"
+description_key = "settings.show_glyph.description"
+default = true
+
+[[widget.setting]]
+key = "show_label"
+type = "bool"
+label_key = "settings.show_label.label"
+description_key = "settings.show_label.description"
+default = false
+
+[[widget.setting]]
+key = "show_countdown"
+type = "bool"
+label_key = "settings.show_countdown.label"
+description_key = "settings.show_countdown.description"
+default = true
+
+[[widget.setting]]
+key = "color_by_usage"
+type = "bool"
+label_key = "settings.color_by_usage.label"
+description_key = "settings.color_by_usage.description"
+default = true

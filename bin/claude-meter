@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+"""claude-meter — report Claude Code plan usage for a status bar.
+
+Reads the OAuth credentials the Claude CLI already wrote to disk, asks
+Anthropic's usage endpoint how much of the 5-hour and 7-day windows are gone,
+and prints the answer as text, Waybar JSON, or a full JSON report.
+
+The endpoint is the undocumented one behind Claude Code's own /usage command.
+It rate-limits hard, so every read goes through an on-disk cache and a failed
+read falls back to the last good one rather than blanking the bar.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# The public Claude CLI OAuth client id — an identifier, not a secret.
+CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+OAUTH_BETA = "oauth-2025-04-20"
+USER_AGENT = "claude-meter/1.0"
+
+DEFAULT_TTL = 300  # seconds; below ~300 the endpoint starts answering 429
+HTTP_TIMEOUT = 20
+MAX_RESPONSE_BYTES = 1 << 20
+
+# Windows the endpoint reports, in the order a bar should read them.
+WINDOWS = [
+    ("five_hour", "Session (5h)", 5 * 3600),
+    ("seven_day", "Weekly", 7 * 86400),
+    ("seven_day_opus", "Weekly Opus", 7 * 86400),
+    ("seven_day_sonnet", "Weekly Sonnet", 7 * 86400),
+    ("seven_day_oauth_apps", "Weekly apps", 7 * 86400),
+]
+
+WARN_AT = 60
+CRIT_AT = 85
+
+
+def cache_dir() -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    path = os.path.join(base, "claude-meter")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def credentials_path() -> str:
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    return os.path.join(config, ".credentials.json")
+
+
+class MeterError(Exception):
+    """A failure worth showing on the bar, with a short machine-readable code."""
+
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(detail or code)
+        self.code = code
+        self.detail = detail
+
+
+# ── Credentials ───────────────────────────────────────────────────────────────
+
+
+def read_credentials() -> dict:
+    path = credentials_path()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        raise MeterError("no_credentials", f"{path} not found; run `claude` and log in")
+    except (OSError, ValueError) as exc:
+        raise MeterError("bad_credentials", str(exc))
+
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+        raise MeterError("no_credentials", "no claudeAiOauth.accessToken in credentials")
+    return data
+
+
+def write_credentials(data: dict) -> None:
+    """Replace the credentials file in one atomic, owner-only step."""
+    path = credentials_path()
+    tmp = path + ".claude-meter.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def token_expired(oauth: dict, skew: int = 60) -> bool:
+    expires_at = oauth.get("expiresAt")
+    if not isinstance(expires_at, (int, float)):
+        return False  # unknown expiry: let a 401 be the trigger instead
+    return (expires_at / 1000.0) - skew <= time.time()
+
+
+def refresh_token(data: dict) -> str:
+    """Trade the refresh token for a new access token and store it.
+
+    Held under a lock file: two bars refreshing at once would race the write,
+    and the loser's refresh token is already spent.
+    """
+    lock_path = os.path.join(cache_dir(), "refresh.lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+        # Another process may have refreshed while we waited for the lock.
+        fresh = read_credentials()
+        oauth = fresh["claudeAiOauth"]
+        if not token_expired(oauth):
+            return oauth["accessToken"]
+
+        refresh = oauth.get("refreshToken")
+        if not refresh:
+            raise MeterError("no_refresh_token", "credentials carry no refreshToken")
+
+        body = json.dumps(
+            {
+                "grant_type": "refresh_token",
+                "client_id": CLIENT_ID,
+                "refresh_token": refresh,
+            }
+        ).encode()
+        request = urllib.request.Request(
+            TOKEN_URL,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "anthropic-beta": OAUTH_BETA,
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+                payload = json.loads(response.read(MAX_RESPONSE_BYTES).decode())
+        except urllib.error.HTTPError as exc:
+            raise MeterError("refresh_failed", f"HTTP {exc.code}")
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise MeterError("network", str(getattr(exc, "reason", exc)))
+        except ValueError as exc:
+            raise MeterError("refresh_failed", str(exc))
+
+        access = payload.get("access_token")
+        if not isinstance(access, str) or not access:
+            raise MeterError("refresh_failed", "response carried no access_token")
+
+        oauth["accessToken"] = access
+        if isinstance(payload.get("refresh_token"), str):
+            oauth["refreshToken"] = payload["refresh_token"]
+        if isinstance(payload.get("expires_in"), (int, float)):
+            oauth["expiresAt"] = int((time.time() + payload["expires_in"]) * 1000)
+        fresh["claudeAiOauth"] = oauth
+        write_credentials(fresh)
+        return access
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def access_token() -> tuple[str, dict]:
+    data = read_credentials()
+    oauth = data["claudeAiOauth"]
+    if token_expired(oauth):
+        return refresh_token(data), oauth
+    return oauth["accessToken"], oauth
+
+
+# ── Usage endpoint ────────────────────────────────────────────────────────────
+
+
+def fetch_usage(token: str) -> dict:
+    request = urllib.request.Request(
+        USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": OAUTH_BETA,
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+            return json.loads(response.read(MAX_RESPONSE_BYTES).decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise MeterError("unauthorized", "HTTP 401")
+        if exc.code == 429:
+            raise MeterError("rate_limited", "HTTP 429 — poll less often")
+        raise MeterError("http_error", f"HTTP {exc.code}")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise MeterError("network", str(getattr(exc, "reason", exc)))
+    except ValueError as exc:
+        raise MeterError("bad_response", str(exc))
+
+
+# ── Report ────────────────────────────────────────────────────────────────────
+
+
+def parse_reset(value) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def severity(percent: float) -> str:
+    if percent >= CRIT_AT:
+        return "critical"
+    if percent >= WARN_AT:
+        return "warning"
+    return "ok"
+
+
+def build_report(usage: dict, oauth: dict, fetched_at: float) -> dict:
+    metrics = []
+    for key, label, window in WINDOWS:
+        block = usage.get(key)
+        if not isinstance(block, dict):
+            continue
+        raw = block.get("utilization")
+        percent = round(float(raw)) if isinstance(raw, (int, float)) else 0
+        percent = max(0, min(100, percent))
+        resets_at = parse_reset(block.get("resets_at"))
+        metrics.append(
+            {
+                "id": key,
+                "label": label,
+                "percent": percent,
+                "severity": severity(percent),
+                "resets_at": resets_at,
+                "resets_in": max(0, round(resets_at - fetched_at)) if resets_at else None,
+                # How far into the window we are, so a bar can say "ahead of pace".
+                "elapsed_percent": (
+                    round(100 - (resets_at - fetched_at) / window * 100)
+                    if resets_at and window
+                    else None
+                ),
+            }
+        )
+    return {
+        "ok": True,
+        "fetched_at": round(fetched_at),
+        "stale": False,
+        "plan": oauth.get("subscriptionType") or "",
+        "tier": oauth.get("rateLimitTier") or "",
+        "metrics": metrics,
+        "error": None,
+    }
+
+
+def cached_report() -> dict | None:
+    try:
+        with open(os.path.join(cache_dir(), "report.json"), "r", encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return report if isinstance(report, dict) and report.get("metrics") else None
+
+
+def store_report(report: dict) -> None:
+    path = os.path.join(cache_dir(), "report.json")
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(report, handle)
+    os.replace(tmp, path)
+
+
+def report(ttl: int, force: bool) -> dict:
+    """The cached report when it is young enough, otherwise a fresh read.
+
+    A failed read returns the cached one marked stale; only a failure with
+    nothing cached returns an error report.
+    """
+    cached = cached_report()
+    if cached and not force:
+        age = time.time() - cached.get("fetched_at", 0)
+        if age < ttl:
+            return cached
+
+    try:
+        token, oauth = access_token()
+        usage = fetch_usage(token)
+    except MeterError as exc:
+        if exc.code == "unauthorized":
+            try:
+                data = read_credentials()
+                data["claudeAiOauth"]["expiresAt"] = 0
+                token = refresh_token(data)
+                oauth = data["claudeAiOauth"]
+                usage = fetch_usage(token)
+            except MeterError as retry_exc:
+                exc = retry_exc
+            else:
+                fresh = build_report(usage, oauth, time.time())
+                store_report(fresh)
+                return fresh
+        if cached:
+            stale = dict(cached)
+            stale["stale"] = True
+            stale["error"] = {"code": exc.code, "detail": exc.detail}
+            return stale
+        return {
+            "ok": False,
+            "fetched_at": round(time.time()),
+            "stale": False,
+            "plan": "",
+            "tier": "",
+            "metrics": [],
+            "error": {"code": exc.code, "detail": exc.detail},
+        }
+
+    fresh = build_report(usage, oauth, time.time())
+    store_report(fresh)
+    return fresh
+
+
+# ── Rendering ─────────────────────────────────────────────────────────────────
+
+
+def pick(report_data: dict, which: str) -> dict | None:
+    metrics = report_data.get("metrics") or []
+    if not metrics:
+        return None
+    if which == "auto":
+        return max(metrics, key=lambda m: m.get("percent", 0))
+    for metric in metrics:
+        if metric.get("id") == which:
+            return metric
+    return None
+
+
+def countdown(seconds) -> str:
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    seconds = int(seconds)
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def render(template: str, report_data: dict, metric: dict | None) -> str:
+    fields = {
+        "pct": metric["percent"] if metric else 0,
+        "remaining": 100 - metric["percent"] if metric else 0,
+        "label": metric["label"] if metric else "",
+        "reset": countdown(metric.get("resets_in")) if metric else "",
+        "plan": report_data.get("plan", ""),
+        "stale": "!" if report_data.get("stale") else "",
+    }
+    for key, value in fields.items():
+        template = template.replace("{" + key + "}", str(value))
+    return template
+
+
+def waybar_json(report_data: dict, metric: dict | None, template: str) -> dict:
+    error = report_data.get("error")
+    if metric is None:
+        detail = (error or {}).get("detail") or (error or {}).get("code") or "no data"
+        return {"text": "claude ?", "tooltip": f"claude-meter: {detail}", "class": "error"}
+
+    lines = [f"Plan: {report_data['plan'] or 'unknown'}"] if report_data.get("plan") else []
+    for row in report_data["metrics"]:
+        left = countdown(row.get("resets_in"))
+        lines.append(f"{row['label']}: {row['percent']}%" + (f" · resets in {left}" if left else ""))
+    if report_data.get("stale"):
+        detail = (error or {}).get("detail") or (error or {}).get("code") or ""
+        lines.append(f"stale — last read failed ({detail})")
+
+    return {
+        "text": render(template, report_data, metric),
+        "tooltip": "\n".join(lines),
+        "percentage": metric["percent"],
+        "class": "stale" if report_data.get("stale") else metric["severity"],
+    }
+
+
+def text_report(report_data: dict) -> str:
+    error = report_data.get("error")
+    if not report_data.get("metrics"):
+        detail = (error or {}).get("detail") or (error or {}).get("code") or "no data"
+        return f"claude-meter: {detail}"
+    lines = []
+    if report_data.get("plan"):
+        lines.append(f"plan {report_data['plan']}")
+    for row in report_data["metrics"]:
+        bar_width = 20
+        filled = round(row["percent"] / 100 * bar_width)
+        bar = "#" * filled + "." * (bar_width - filled)
+        left = countdown(row.get("resets_in"))
+        lines.append(
+            f"{row['label']:<14} [{bar}] {row['percent']:>3}%"
+            + (f"  resets in {left}" if left else "")
+        )
+    if report_data.get("stale"):
+        detail = (error or {}).get("detail") or (error or {}).get("code") or ""
+        lines.append(f"(stale: {detail})")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="claude-meter",
+        description="Claude Code plan usage for a status bar.",
+    )
+    parser.add_argument("--json", action="store_true", help="Waybar-compatible JSON on one line")
+    parser.add_argument("--report", action="store_true", help="full JSON report (bar plugins)")
+    parser.add_argument(
+        "--metric",
+        default="auto",
+        help="which window to put on the bar: auto (busiest), five_hour, seven_day, "
+        "seven_day_opus, seven_day_sonnet",
+    )
+    parser.add_argument(
+        "--format",
+        default="{pct}% · {reset}",
+        help="text template; {pct} {remaining} {label} {reset} {plan} {stale}",
+    )
+    parser.add_argument("--ttl", type=int, default=DEFAULT_TTL, help="cache lifetime in seconds")
+    parser.add_argument("--refresh", action="store_true", help="ignore the cache for this read")
+    parser.add_argument("--watch", type=int, metavar="SECONDS", help="reprint every SECONDS")
+    args = parser.parse_args()
+
+    # argparse cannot tell a default apart from the same value typed out, and a
+    # bare run should print the full table rather than the one-line template.
+    format_given = any(arg.startswith("--format") for arg in sys.argv[1:])
+
+    def once() -> int:
+        data = report(args.ttl, args.refresh)
+        metric = pick(data, args.metric)
+        if args.report:
+            print(json.dumps(data), flush=True)
+        elif args.json:
+            print(json.dumps(waybar_json(data, metric, args.format)), flush=True)
+        elif format_given and metric:
+            print(render(args.format, data, metric), flush=True)
+        else:
+            print(text_report(data), flush=True)
+        return 0 if data.get("metrics") else 1
+
+    if args.watch:
+        interval = max(60, args.watch)
+        while True:
+            try:
+                once()
+            except MeterError as exc:
+                print(f"claude-meter: {exc.code}: {exc}", file=sys.stderr, flush=True)
+            time.sleep(interval)
+
+    try:
+        return once()
+    except MeterError as exc:
+        if args.json:
+            print(json.dumps({"text": "claude ?", "tooltip": str(exc), "class": "error"}))
+        elif args.report:
+            print(json.dumps({"ok": False, "metrics": [],
+                              "error": {"code": exc.code, "detail": exc.detail}}))
+        else:
+            print(f"claude-meter: {exc.code}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

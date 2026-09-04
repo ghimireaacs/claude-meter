@@ -1,0 +1,35 @@
+{
+  "settings": {
+    "color_by_usage": {
+      "description": "Tint the reading as it climbs: neutral, then warning, then error",
+      "label": "Color by usage"
+    },
+    "metric": {
+      "description": "Which usage window this capsule follows",
+      "label": "Window",
+      "option": {
+        "auto": "Busiest window",
+        "five_hour": "Session (5h)",
+        "seven_day": "Weekly",
+        "seven_day_opus": "Weekly Opus",
+        "seven_day_sonnet": "Weekly Sonnet"
+      }
+    },
+    "refresh_minutes": {
+      "description": "Minutes between reads. The usage endpoint rate-limits below 5 minutes.",
+      "label": "Refresh interval"
+    },
+    "show_countdown": {
+      "description": "Show the time left until the window resets",
+      "label": "Show countdown"
+    },
+    "show_glyph": {
+      "description": "Show the icon beside the reading",
+      "label": "Show icon"
+    },
+    "show_label": {
+      "description": "Show the window name beside the reading",
+      "label": "Show window name"
+    }
+  }
+}
