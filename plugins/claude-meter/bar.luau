@@ -7,11 +7,44 @@
 
 local metricId = tostring(noctalia.getConfig("metric") or "auto")
 local showGlyph = noctalia.getConfig("show_glyph") ~= false
-local showLabel = noctalia.getConfig("show_label") == true
+local showGauge = noctalia.getConfig("show_gauge") ~= false
 local showCountdown = noctalia.getConfig("show_countdown") ~= false
 local colorByUsage = noctalia.getConfig("color_by_usage") ~= false
 
-local COMMAND = "claude-meter --report --metric " .. metricId
+-- Catppuccin by name, or the shell's own semantic roles. Hex is accepted
+-- wherever a role token is, so a flavour is a lookup rather than a code path.
+local PALETTES = {
+    mocha = { ok = "#a6e3a1", warning = "#fab387", critical = "#f38ba8",
+              calm = "#cdd6f4", muted = "#a6adc8", track = "#585b70", accent = "#cba6f7" },
+    macchiato = { ok = "#a6da95", warning = "#f5a97f", critical = "#ed8796",
+                  calm = "#cad3f5", muted = "#b8c0e0", track = "#5b6078", accent = "#c6a0f6" },
+    frappe = { ok = "#a6d189", warning = "#ef9f76", critical = "#e78284",
+               calm = "#c6d0f5", muted = "#b5bfe2", track = "#626880", accent = "#ca9ee6" },
+    latte = { ok = "#40a02b", warning = "#fe640b", critical = "#d20f39",
+              calm = "#4c4f69", muted = "#6c6f85", track = "#9ca0b0", accent = "#8839ef" },
+    -- The shell's roles, so the capsule re-tints itself with the active theme.
+    theme = { ok = "on_surface", warning = "tertiary", critical = "error",
+              calm = "on_surface", muted = "on_surface_variant",
+              track = "on_surface/0.16", accent = "primary" },
+}
+
+local palette = PALETTES[tostring(noctalia.getConfig("palette") or "mocha")] or PALETTES.mocha
+
+-- Noctalia inherits the compositor's environment, which on most session
+-- managers does not carry ~/.local/bin. Fall back to the install path the
+-- installer uses before giving up on a "not on PATH" error.
+local function resolveBinary()
+    local configured = tostring(noctalia.getConfig("binary") or ""):match("^%s*(.-)%s*$")
+    if configured == "" then configured = "claude-meter" end
+    if noctalia.commandExists(configured) then return configured end
+    if configured:find("/") == nil then
+        local fallback = noctalia.expandPath("~/.local/bin/" .. configured)
+        if noctalia.commandExists(fallback) then return fallback end
+    end
+    return configured
+end
+
+local COMMAND = resolveBinary() .. " --report --metric " .. metricId
 local TIMEOUT_MS = 30000
 
 local report = nil
@@ -62,70 +95,54 @@ local function secondsLeft(metric)
     return left
 end
 
-local function countdown(metric)
+-- Two units on the bar ("4d 7h") is the string that overflowed a capsule, so
+-- the bar gets the largest unit alone and the tooltip keeps the precision.
+local function countdown(metric, long)
     local left = secondsLeft(metric)
     if left == nil or left <= 0 then return "" end
     local days = math.floor(left / 86400)
     local hours = math.floor((left % 86400) / 3600)
     local minutes = math.floor((left % 3600) / 60)
-    if days > 0 then return string.format("%dd %dh", days, hours) end
-    if hours > 0 then return string.format("%dh %dm", hours, minutes) end
+    if long then
+        if days > 0 then return string.format("%dd %dh", days, hours) end
+        if hours > 0 then return string.format("%dh %dm", hours, minutes) end
+        return string.format("%dm", minutes)
+    end
+    if days > 0 then return string.format("%dd", days) end
+    if hours > 0 then return string.format("%dh", hours) end
     return string.format("%dm", minutes)
 end
 
 local function severityColor(metric)
-    if not colorByUsage then return "on_surface" end
+    if not colorByUsage then return palette.calm end
     local severity = tostring(metric.severity or "ok")
-    if severity == "critical" then return "error" end
-    if severity == "warning" then return "tertiary" end
-    return "on_surface"
-end
-
-local function errorText()
-    if failure == "" then return "" end
-    if failure == "not_installed" then return "claude-meter is not on PATH" end
-    if failure == "no_credentials" then return "No Claude credentials — run `claude` and log in" end
-    if failure == "rate_limited" then return "Rate limited — raise the refresh interval" end
-    if failure == "network" then return "Network unreachable" end
-    if failure == "timed_out" then return "claude-meter timed out" end
-    return failure
+    if severity == "critical" then return palette.critical end
+    if severity == "warning" then return palette.warning end
+    -- Quiet usage reads as text, not as a green alarm; the gauge carries the
+    -- colour that matters.
+    return palette.calm
 end
 
 -- ── Rendering ─────────────────────────────────────────────────────────────────
 
-local function tooltipRows()
-    local rows = {}
-    if failure ~= "" then
-        rows[#rows + 1] = { key = "Claude Meter", value = errorText() }
-        if report == nil then return rows end
+-- Two stacked bars: usage on top, how far into the window we are underneath.
+-- A fill running past the thin one is spend ahead of the clock, which is the
+-- pace note without a word of text.
+local function gauge(metric, tint)
+    local percent = math.max(0, math.min(100, tonumber(metric.percent) or 0))
+    -- The fill is the accent while usage is quiet and the severity colour once
+    -- it is not, so the bar answers before the number is read.
+    local fill = tostring(metric.severity or "ok") == "ok" and palette.accent or tint
+    local bars = {
+        ui.progress({ progress = percent / 100, fill = fill, track = palette.track,
+                      radius = 3, width = 26, height = 4 }),
+    }
+    local elapsed = tonumber(metric.elapsed_percent)
+    if elapsed ~= nil and elapsed >= 0 and elapsed <= 100 then
+        bars[2] = ui.progress({ progress = elapsed / 100, fill = palette.muted,
+                                track = palette.track, radius = 1, width = 26, height = 2 })
     end
-    if type(report) == "table" and tostring(report.plan or "") ~= "" then
-        rows[#rows + 1] = { key = "Plan", value = tostring(report.plan) }
-    end
-    for _, metric in ipairs(metrics()) do
-        local value = tostring(metric.percent or 0) .. "%"
-        local left = countdown(metric)
-        if left ~= "" then value = value .. " · resets in " .. left end
-        local elapsed = tonumber(metric.elapsed_percent)
-        -- Usage against time spent: 60% burned 20% into the window is the number
-        -- worth knowing, and it costs one subtraction to say.
-        if elapsed ~= nil and elapsed >= 0 and elapsed <= 100 then
-            local delta = (tonumber(metric.percent) or 0) - elapsed
-            if delta >= 10 then
-                value = value .. " · ahead of pace"
-            elseif delta <= -10 then
-                value = value .. " · behind pace"
-            end
-        end
-        rows[#rows + 1] = { key = tostring(metric.label or metric.id or "?"), value = value }
-    end
-    if type(report) == "table" and report.stale == true then
-        rows[#rows + 1] = { key = "Updated", value = "stale — last read failed" }
-    end
-    if #rows == 0 then
-        rows[1] = { key = "Claude Meter", value = "Waiting for the first read" }
-    end
-    return rows
+    return ui.column({ gap = 1, align = "center" }, bars)
 end
 
 local function render()
@@ -137,49 +154,53 @@ local function render()
             name = "brain",
             size = 13,
             color = metric ~= nil and severityColor(metric)
-                or (failure ~= "" and "error" or "on_surface_variant"),
+                or (failure ~= "" and palette.critical or palette.muted),
         })
     end
 
     if metric ~= nil then
-        if showLabel then
-            children[#children + 1] = ui.label({
-                text = tostring(metric.label or ""),
-                fontSize = 10,
-                color = "on_surface_variant",
-                maxLines = 1,
-            })
+        if showGauge then
+            children[#children + 1] = gauge(metric, severityColor(metric))
         end
+        -- Fixed width, right-aligned: the capsule is as wide at 7% as at 100%
+        -- and stops nudging the widgets beside it once per read.
         children[#children + 1] = ui.label({
             text = tostring(metric.percent or 0) .. "%",
-            fontSize = 12,
+            fontSize = 11,
+            fontWeight = "semibold",
             color = severityColor(metric),
             maxLines = 1,
+            width = 30,
+            textAlign = "end",
         })
         local left = showCountdown and countdown(metric) or ""
         if left ~= "" then
             children[#children + 1] = ui.label({
                 text = left,
                 fontSize = 10,
-                color = "on_surface_variant",
+                color = palette.muted,
                 maxLines = 1,
+                width = 22,
+                textAlign = "end",
             })
         end
-        -- A stale reading keeps its numbers and says so, rather than blanking
-        -- the capsule over one failed poll.
+        -- A stale reading keeps its numbers and marks them. A glyph, not a "!",
+        -- so the row width does not change when it appears.
         if type(report) == "table" and report.stale == true then
-            children[#children + 1] = ui.label({ text = "!", fontSize = 10, color = "tertiary" })
+            children[#children + 1] = ui.glyph({ name = "clock-exclamation", size = 11,
+                                                 color = palette.warning })
         end
     elseif #children == 0 then
         children[1] = ui.glyph({
             name = "brain",
             size = 13,
-            color = failure ~= "" and "error" or "on_surface_variant",
+            color = failure ~= "" and palette.critical or palette.muted,
         })
     end
 
-    barWidget.render(ui.row({ gap = 5, align = "center" }, children))
-    barWidget.setTooltip(tooltipRows())
+    -- No tooltip: hover offered theme-painted key/value strings, and the panel
+    -- says the same thing in colour on a click.
+    barWidget.render(ui.row({ gap = 4, align = "center" }, children))
 end
 
 -- ── Polling ───────────────────────────────────────────────────────────────────
@@ -223,10 +244,10 @@ local function poll(force)
     end
 end
 
--- A click asks for a read now; the CLI's own floor keeps a rapid click from
--- reaching the endpoint every time.
+-- A click opens the panel, which asks for its own read on the way up. The
+-- capsule still refreshes on its timer, so a bar with no panel open stays live.
 function onClick()
-    poll(true)
+    noctalia.togglePanel("ghimireaacs/claude-meter:panel")
 end
 
 function onConfigChanged()

@@ -6,8 +6,8 @@ window and the 7-day window you have burned, and when each one resets.
 ```
 $ claude-meter
 plan pro
-Session (5h)   [######..............]  31%  resets in 2h 45m
-Weekly         [####................]  20%  resets in 4d 7h
+Session (5h)   [######..............]  31%  resets in 2h 45m  (1:20 AM Sat 5 Sep)
+Weekly         [####................]  20%  resets in 4d 7h  (6:00 AM Wed 9 Sep)
 ```
 
 Two pieces that work independently:
@@ -131,6 +131,9 @@ Exit status is `1` when no usage could be read, cached or otherwise.
       "severity": "ok",
       "resets_at": 1788535200.31,
       "resets_in": 9908,
+      "resets_clock": "1:20 AM",
+      "resets_day": "Sat 5 Sep",
+      "resets_label": "1:20 AM Sat 5 Sep",
       "elapsed_percent": 45
     }
   ],
@@ -171,13 +174,42 @@ Per-instance settings, so a second capsule can follow a second window:
 
 - **Window** — which usage window this capsule tracks; `auto` follows whichever
   is closest to running out.
-- **Show icon / window name / countdown** — what goes in the capsule.
-- **Color by usage** — neutral, then warning, then error as the reading climbs.
+- **Show gauge** — a usage bar with a thinner bar beneath it marking how far
+  into the window you are. A fill running past the thin bar is spend ahead of
+  the clock.
+- **Show icon / countdown** — the rest of the capsule.
+- **Color by usage** — off keeps the reading in the palette's text color and
+  leaves the gauge to carry the severity.
 
-Plugin-wide: **Refresh interval** in minutes, floored at 5.
+The gauge fills with the palette's accent (mauve on Mocha) while usage is
+quiet and switches to peach at 60% and red at 85%, so the bar answers before
+the number is read.
 
-Left-click forces a read. The tooltip lists every window, the plan, the reset
-countdowns, and the pace note.
+The capsule keeps a fixed width: the reading is right-aligned in a 30px column
+and the countdown carries one unit (`2h`, `4d`), so nothing shifts or clips as
+the numbers change. There is no tooltip — exact resets, per-window figures and
+the pace note live in the panel, one click away.
+
+Plugin-wide: **Palette** — Catppuccin Mocha (default), Macchiato, Frappé,
+Latte, or **Follow Noctalia theme** for the shell's own semantic roles — shared
+by the capsule and the panel so both are painted from one choice.
+**Refresh interval** in minutes, floored at 5, and **CLI path** —
+leave it as `claude-meter` to resolve on PATH, or give an absolute path when the
+shell's environment does not carry your `bin` directory.
+
+Left-click opens the panel — the colored half, and the only detail surface. A
+tooltip can only hand the shell key/value strings, which the theme paints
+uniformly, so the detail lives where real gauges can: a palette-tinted bar per
+window over a thinner elapsed bar, a pace arrow shown past ±10 points, the
+countdown ticking by the second while the panel is open, and the dated
+wall-clock reset (`5:00 PM Sat 14 Sep`) — every window, session included, so a
+reset is an appointment rather than a countdown to work out. A refresh button
+sits in the header, and the panel runs the CLI itself, so it works whether or
+not a capsule is on a bar.
+
+```bash
+noctalia msg panel-toggle ghimireaacs/claude-meter:panel
+```
 
 ## How it works
 
@@ -214,8 +246,8 @@ interval cost one request between them.
 | `no_credentials` | Claude Code has not been logged in, or `CLAUDE_CONFIG_DIR` points elsewhere. Run `claude` and sign in. |
 | `rate_limited` | Polling faster than the endpoint tolerates. Raise the interval to 300s or more. |
 | `refresh_failed` | The refresh token was rejected — usually an expired or revoked session. Log in with `claude` again. |
-| Widget shows the icon only | The CLI is not on the PATH Noctalia inherited. Check `command -v claude-meter` in the session that launched the shell, or symlink it into `/usr/local/bin`. |
-| A window vanished from the tooltip | The endpoint stopped reporting that field. It is undocumented and can change without notice. |
+| Widget shows the icon only, panel says the CLI was not found | Noctalia inherits the compositor's environment, which often lacks `~/.local/bin`. The widget already falls back to `~/.local/bin/claude-meter`; if you installed it elsewhere, put the full path in **CLI path** in the plugin settings. |
+| A window vanished from the panel | The endpoint stopped reporting that field. It is undocumented and can change without notice. |
 
 ## Prior art
 

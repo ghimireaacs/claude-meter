@@ -1,5 +1,9 @@
 {
   "settings": {
+    "binary": {
+      "description": "Name or absolute path of the claude-meter executable",
+      "label": "CLI path"
+    },
     "color_by_usage": {
       "description": "Tint the reading as it climbs: neutral, then warning, then error",
       "label": "Color by usage"
@@ -15,6 +19,17 @@
         "seven_day_sonnet": "Weekly Sonnet"
       }
     },
+    "palette": {
+      "description": "Catppuccin flavour for the reading and the gauge, or the shell's own theme colors",
+      "label": "Palette",
+      "option": {
+        "frappe": "Catppuccin Frappé",
+        "latte": "Catppuccin Latte",
+        "macchiato": "Catppuccin Macchiato",
+        "mocha": "Catppuccin Mocha",
+        "theme": "Follow Noctalia theme"
+      }
+    },
     "refresh_minutes": {
       "description": "Minutes between reads. The usage endpoint rate-limits below 5 minutes.",
       "label": "Refresh interval"
@@ -27,9 +42,9 @@
       "description": "Show the icon beside the reading",
       "label": "Show icon"
     },
-    "show_label": {
-      "description": "Show the window name beside the reading",
-      "label": "Show window name"
+    "show_gauge": {
+      "description": "Show the usage bar, with a thinner bar underneath marking how far into the window you are",
+      "label": "Show gauge"
     }
   }
 }

@@ -225,6 +225,21 @@ def parse_reset(value) -> float | None:
         return None
 
 
+def reset_labels(resets_at: float | None, now: float) -> tuple[str, str]:
+    """Wall-clock strings for a reset: the time, and the dated day it falls on.
+
+    A window resetting in "4d 7h" is a countdown nobody can plan around;
+    "5:00 PM Sat 14 Sep" is the same fact as an appointment. The date is on
+    every window, session included — "tomorrow" reads fine at 11 PM and badly
+    at 2 AM, and a date never has to be worked out.
+    """
+    if not resets_at:
+        return "", ""
+    when = datetime.fromtimestamp(resets_at)
+    clock = when.strftime("%I:%M %p").lstrip("0")
+    return clock, when.strftime("%a %-d %b")
+
+
 def severity(percent: float) -> str:
     if percent >= CRIT_AT:
         return "critical"
@@ -243,6 +258,7 @@ def build_report(usage: dict, oauth: dict, fetched_at: float) -> dict:
         percent = round(float(raw)) if isinstance(raw, (int, float)) else 0
         percent = max(0, min(100, percent))
         resets_at = parse_reset(block.get("resets_at"))
+        clock, day = reset_labels(resets_at, fetched_at)
         metrics.append(
             {
                 "id": key,
@@ -250,6 +266,11 @@ def build_report(usage: dict, oauth: dict, fetched_at: float) -> dict:
                 "percent": percent,
                 "severity": severity(percent),
                 "resets_at": resets_at,
+                # Rendered here rather than in the bar: the widget has no
+                # locale, no timezone database and no month names.
+                "resets_clock": clock,
+                "resets_day": day,
+                "resets_label": (clock + " " + day).strip() if clock else "",
                 "resets_in": max(0, round(resets_at - fetched_at)) if resets_at else None,
                 # How far into the window we are, so a bar can say "ahead of pace".
                 "elapsed_percent": (
@@ -372,6 +393,7 @@ def render(template: str, report_data: dict, metric: dict | None) -> str:
         "remaining": 100 - metric["percent"] if metric else 0,
         "label": metric["label"] if metric else "",
         "reset": countdown(metric.get("resets_in")) if metric else "",
+        "when": (metric.get("resets_label") or "") if metric else "",
         "plan": report_data.get("plan", ""),
         "stale": "!" if report_data.get("stale") else "",
     }
@@ -389,7 +411,11 @@ def waybar_json(report_data: dict, metric: dict | None, template: str) -> dict:
     lines = [f"Plan: {report_data['plan'] or 'unknown'}"] if report_data.get("plan") else []
     for row in report_data["metrics"]:
         left = countdown(row.get("resets_in"))
-        lines.append(f"{row['label']}: {row['percent']}%" + (f" · resets in {left}" if left else ""))
+        when = row.get("resets_label") or ""
+        tail = f" · resets in {left}" if left else ""
+        if when:
+            tail += f" ({when})"
+        lines.append(f"{row['label']}: {row['percent']}%" + tail)
     if report_data.get("stale"):
         detail = (error or {}).get("detail") or (error or {}).get("code") or ""
         lines.append(f"stale — last read failed ({detail})")
@@ -415,9 +441,11 @@ def text_report(report_data: dict) -> str:
         filled = round(row["percent"] / 100 * bar_width)
         bar = "#" * filled + "." * (bar_width - filled)
         left = countdown(row.get("resets_in"))
+        when = row.get("resets_label") or ""
         lines.append(
             f"{row['label']:<14} [{bar}] {row['percent']:>3}%"
             + (f"  resets in {left}" if left else "")
+            + (f"  ({when})" if when else "")
         )
     if report_data.get("stale"):
         detail = (error or {}).get("detail") or (error or {}).get("code") or ""
@@ -441,7 +469,7 @@ def main() -> int:
     parser.add_argument(
         "--format",
         default="{pct}% · {reset}",
-        help="text template; {pct} {remaining} {label} {reset} {plan} {stale}",
+        help="text template; {pct} {remaining} {label} {reset} {when} {plan} {stale}",
     )
     parser.add_argument("--ttl", type=int, default=DEFAULT_TTL, help="cache lifetime in seconds")
     parser.add_argument("--refresh", action="store_true", help="ignore the cache for this read")

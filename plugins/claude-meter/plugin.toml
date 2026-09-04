@@ -26,6 +26,31 @@ default = 5
 min = 5
 max = 120
 
+# A bar the compositor launched from a session manager rarely inherits
+# ~/.local/bin. Left as a plain name it resolves on PATH; point it at an
+# absolute path when the shell cannot find it.
+# Plugin-level: the capsule and the panel are painted from one choice.
+[[setting]]
+key = "palette"
+type = "select"
+label_key = "settings.palette.label"
+description_key = "settings.palette.description"
+default = "mocha"
+options = [
+  { value = "mocha", label_key = "settings.palette.option.mocha" },
+  { value = "macchiato", label_key = "settings.palette.option.macchiato" },
+  { value = "frappe", label_key = "settings.palette.option.frappe" },
+  { value = "latte", label_key = "settings.palette.option.latte" },
+  { value = "theme", label_key = "settings.palette.option.theme" },
+]
+
+[[setting]]
+key = "binary"
+type = "string"
+label_key = "settings.binary.label"
+description_key = "settings.binary.description"
+default = "claude-meter"
+
 [[widget]]
 id = "bar"
 entry = "bar.luau"
@@ -54,11 +79,11 @@ description_key = "settings.show_glyph.description"
 default = true
 
 [[widget.setting]]
-key = "show_label"
+key = "show_gauge"
 type = "bool"
-label_key = "settings.show_label.label"
-description_key = "settings.show_label.description"
-default = false
+label_key = "settings.show_gauge.label"
+description_key = "settings.show_gauge.description"
+default = true
 
 [[widget.setting]]
 key = "show_countdown"
@@ -73,3 +98,11 @@ type = "bool"
 label_key = "settings.color_by_usage.label"
 description_key = "settings.color_by_usage.description"
 default = true
+
+# The coloured half: a click opens real gauges, tinted by the palette, where a
+# tooltip could only offer theme-painted key/value strings.
+[[panel]]
+id = "panel"
+entry = "panel.luau"
+width = 340
+height = 260
